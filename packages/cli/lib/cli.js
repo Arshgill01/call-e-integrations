@@ -1340,6 +1340,16 @@ async function handleMcpCommand({ command, positional, options, config, deps, st
         timeoutSeconds: mcpToolTimeoutSeconds({ config, options, toolName }),
         fetchImpl: deps.fetchImpl || globalThis.fetch,
       });
+      if (result?.isError === true) {
+        const remoteError = safeRemoteCallError(result);
+        throw new CallStageError(remoteError.message || `${toolName} returned an error.`, {
+          stage: toolName,
+          code: `${toolName}_error`,
+          callStarted: remoteError.call_started ?? false,
+          retrySafe: remoteError.retry_safe ?? true,
+          remoteError,
+        });
+      }
       writeJson(stdout, mcpSuccessPayload({ config, toolName, result }));
       return 0;
     }

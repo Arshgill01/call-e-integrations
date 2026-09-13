@@ -1207,6 +1207,65 @@ test("mcp call leaves non-plan tools without request meta or timestamp localizat
   ]);
 });
 
+test("mcp call treats tool isError as a failed command", async () => {
+  const cacheRoot = makeTempRoot("calle-cli-mcp-call-is-error");
+  const serverUrl = "https://mcp.example/mcp/openagent_oauth";
+  writeToken(cacheRoot, serverUrl, "call-token");
+  const fetchImpl = async (_url, init) => {
+    const payload = JSON.parse(init.body);
+    if (payload.method === "initialize") {
+      return jsonRpcResponse({ jsonrpc: "2.0", id: payload.id, result: {} }, { headers: { "mcp-session-id": "sess-1" } });
+    }
+    if (payload.method === "notifications/initialized") {
+      return jsonRpcResponse({});
+    }
+    if (payload.method === "tools/call") {
+      return jsonRpcResponse({
+        jsonrpc: "2.0",
+        id: payload.id,
+        result: {
+          isError: true,
+          content: [{ type: "text", text: "Fixture status lookup failed" }],
+          structuredContent: {
+            error_code: "RUN_NOT_FOUND",
+            message: "Fixture status lookup failed",
+            retry_safe: true,
+            call_started: false,
+            internal_secret: "do-not-print",
+          },
+        },
+      });
+    }
+    throw new Error(`unexpected method: ${payload.method}`);
+  };
+
+  const result = await run(
+    [
+      "mcp",
+      "call",
+      "get_call_run",
+      "--args-json",
+      '{"run_id":"run-missing"}',
+      "--base-url",
+      "https://mcp.example",
+      "--cache-root",
+      cacheRoot,
+    ],
+    { fetchImpl }
+  );
+  const payload = JSON.parse(result.stdout);
+
+  assert.equal(result.code, 1);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.stage, "get_call_run");
+  assert.equal(payload.call_started, false);
+  assert.equal(payload.retry_safe, true);
+  assert.equal(payload.error.code, "get_call_run_error");
+  assert.equal(payload.error.error_code, "RUN_NOT_FOUND");
+  assert.equal(payload.error.message, "Fixture status lookup failed");
+  assert.doesNotMatch(result.stdout, /do-not-print|Fixture status lookup failed service-secret/);
+});
+
 test("call plan maps flags to plan_call arguments", async () => {
   const cacheRoot = makeTempRoot("calle-cli-call-plan");
   const serverUrl = "https://mcp.example/mcp/openagent_oauth";
