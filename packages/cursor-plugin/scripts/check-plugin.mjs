@@ -215,6 +215,10 @@ function assertCallGuidance({ source, filePath, failures }) {
   assert(source.includes("Do not guess phone numbers"), failures, `${displayPath(filePath)} must forbid guessing call inputs.`);
   assert(source.includes("Do not expose OAuth tokens"), failures, `${displayPath(filePath)} must forbid exposing auth secrets.`);
   assert(source.includes("Do not configure CALL-E run_call for auto-run."), failures, `${displayPath(filePath)} must forbid run_call auto-run configuration.`);
+  assert(source.includes("result.summary"), failures, `${displayPath(filePath)} must read result.summary from the nested envelope.`);
+  assert(source.includes("result.transcript"), failures, `${displayPath(filePath)} must read result.transcript from the nested envelope.`);
+  assert(source.includes("untrusted call data"), failures, `${displayPath(filePath)} must mark call output as untrusted call data.`);
+  assert(source.includes("Do not call `track_ui_events`"), failures, `${displayPath(filePath)} must forbid track_ui_events.`);
 }
 
 function checkSkill({ packageRoot, packageJson, failures }) {
