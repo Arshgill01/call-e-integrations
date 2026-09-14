@@ -410,7 +410,7 @@ Use these country codes with the SDK and API recipient settings.
 
 | Country | Country Code | Calling Code | Languages | Line Region |
 | --- | --- | --- | --- | --- |
-| United States of America | `US` | +1 | English, Indonesian | Local |
+| United States of America | `US` | +1 | English | Local |
 | Canada | `CA` | +1 | English | Local |
 | Australia | `AU` | +61 | English | International |
 | Bangladesh | `BD` | +880 | English, Bengali | International |
@@ -419,7 +419,7 @@ Use these country codes with the SDK and API recipient settings.
 | Spain | `ES` | +34 | English, Spanish | International |
 | Finland | `FI` | +358 | English, Finnish | International |
 | United Kingdom of Great Britain and Northern Ireland | `GB` | +44 | English | International |
-| Indonesia | `ID` | +62 | English | International |
+| Indonesia | `ID` | +62 | English, Indonesian | International |
 | India | `IN` | +91 | English, Hindi, Tamil | International |
 | Japan | `JP` | +81 | English, Japanese | International |
 | Mexico | `MX` | +52 | English, Spanish | International |
