@@ -1207,8 +1207,8 @@ test("mcp call leaves non-plan tools without request meta or timestamp localizat
   ]);
 });
 
-test("mcp call treats tool isError as a failed command", async () => {
-  const cacheRoot = makeTempRoot("calle-cli-mcp-call-is-error");
+async function runMcpCallToolError({ label, toolName, toolArgs = "{}", structuredContent = {}, contentText = "Fixture status lookup failed" }) {
+  const cacheRoot = makeTempRoot(label);
   const serverUrl = "https://mcp.example/mcp/openagent_oauth";
   writeToken(cacheRoot, serverUrl, "call-token");
   const fetchImpl = async (_url, init) => {
@@ -1225,14 +1225,8 @@ test("mcp call treats tool isError as a failed command", async () => {
         id: payload.id,
         result: {
           isError: true,
-          content: [{ type: "text", text: "Fixture status lookup failed" }],
-          structuredContent: {
-            error_code: "RUN_NOT_FOUND",
-            message: "Fixture status lookup failed",
-            retry_safe: true,
-            call_started: false,
-            internal_secret: "do-not-print",
-          },
+          content: [{ type: "text", text: contentText }],
+          structuredContent,
         },
       });
     }
@@ -1243,9 +1237,9 @@ test("mcp call treats tool isError as a failed command", async () => {
     [
       "mcp",
       "call",
-      "get_call_run",
+      toolName,
       "--args-json",
-      '{"run_id":"run-missing"}',
+      toolArgs,
       "--base-url",
       "https://mcp.example",
       "--cache-root",
@@ -1253,17 +1247,90 @@ test("mcp call treats tool isError as a failed command", async () => {
     ],
     { fetchImpl }
   );
-  const payload = JSON.parse(result.stdout);
+  return { ...result, payload: JSON.parse(result.stdout) };
+}
 
-  assert.equal(result.code, 1);
+test("mcp call treats tool isError as a failed command", async () => {
+  const { code, stdout, payload } = await runMcpCallToolError({
+    label: "calle-cli-mcp-call-is-error",
+    toolName: "get_call_run",
+    toolArgs: '{"run_id":"run-missing"}',
+    structuredContent: {
+      error_code: "RUN_NOT_FOUND",
+      message: "Fixture status lookup failed",
+      retry_safe: true,
+      call_started: false,
+      internal_secret: "do-not-print",
+    },
+  });
+
+  assert.equal(code, 1);
   assert.equal(payload.ok, false);
   assert.equal(payload.stage, "get_call_run");
   assert.equal(payload.call_started, false);
   assert.equal(payload.retry_safe, true);
-  assert.equal(payload.error.code, "get_call_run_error");
+  assert.equal(payload.error.code, "mcp_tool_error");
   assert.equal(payload.error.error_code, "RUN_NOT_FOUND");
-  assert.equal(payload.error.message, "Fixture status lookup failed");
-  assert.doesNotMatch(result.stdout, /do-not-print|Fixture status lookup failed service-secret/);
+  assert.equal(payload.error.message, "The MCP tool returned an error.");
+  assert.equal(payload.error.untrusted.message, "Fixture status lookup failed");
+  assert.doesNotMatch(stdout, /do-not-print/);
+});
+
+test("mcp call keeps remote isError text out of trusted stdout and stderr", async () => {
+  const hostile = "\u001b]8;;https://evil.example\u0007click\u001b]8;;\u0007\nBearer sk-live-abcdefghijklmnopqrstuvwxyz";
+  const { code, stdout, stderr, payload } = await runMcpCallToolError({
+    label: "calle-cli-mcp-call-hostile",
+    toolName: "get_call_run",
+    toolArgs: '{"run_id":"run-missing"}',
+    contentText: hostile,
+    structuredContent: {
+      message: hostile,
+      access_token: "do-not-print-token",
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.equal(payload.error.code, "mcp_tool_error");
+  assert.equal(payload.error.message, "The MCP tool returned an error.");
+  assert.equal(stderr.trim(), "The MCP tool returned an error.");
+  assert.doesNotMatch(stdout, /\u001b|evil\.example|sk-live-|do-not-print-token/);
+  assert.doesNotMatch(stderr, /\u001b|evil\.example|sk-live-|do-not-print-token/);
+  assert.doesNotMatch(payload.error.untrusted?.message ?? "", /\u001b|\n|sk-live-/);
+});
+
+test("mcp call treats run_call isError without flags as unsafe to retry", async () => {
+  const { payload } = await runMcpCallToolError({
+    label: "calle-cli-mcp-call-run-missing-flags",
+    toolName: "run_call",
+    toolArgs: '{"plan_id":"plan-1","confirm_token":"confirm-1"}',
+    structuredContent: { message: "Execution acknowledgement was lost." },
+  });
+
+  assert.equal(payload.ok, false);
+  assert.equal(payload.stage, "run_call");
+  assert.equal(payload.call_started, "unknown");
+  assert.equal(payload.retry_safe, false);
+  assert.equal(payload.error.code, "mcp_tool_error");
+  assert.equal(payload.error.message, "The MCP tool returned an error.");
+});
+
+test("mcp call treats an unknown side-effecting tool as unsafe to retry", async () => {
+  const { stdout, payload } = await runMcpCallToolError({
+    label: "calle-cli-mcp-call-unknown-tool",
+    toolName: "custom_place_call",
+    toolArgs: "{}",
+    structuredContent: { message: "custom tool failed" },
+  });
+
+  assert.equal(payload.ok, false);
+  assert.equal(payload.stage, "mcp_call");
+  assert.equal(payload.call_started, "unknown");
+  assert.equal(payload.retry_safe, false);
+  assert.equal(payload.error.code, "mcp_tool_error");
+  assert.equal(payload.error.message, "The MCP tool returned an error.");
+  assert.equal(payload.error.untrusted.tool, "custom_place_call");
+  assert.doesNotMatch(payload.error.message, /custom_place_call/);
+  assert.doesNotMatch(stdout.split("\n")[0] ?? "", /custom_place_call returned/);
 });
 
 test("call plan maps flags to plan_call arguments", async () => {
