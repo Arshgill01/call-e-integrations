@@ -5,6 +5,7 @@ import {
   readCallRecovery,
   readJson,
   readPendingLogin,
+  readPlanConfirm,
   removeCallRecoveries,
   removeCallRecovery,
   removeFile,
@@ -12,6 +13,7 @@ import {
   tokenCachePath,
   tokenIsUsable,
   writeCallRecovery,
+  writePlanConfirm,
 } from "./cache.js";
 import {
   DEFAULT_BASE_URL,
@@ -157,7 +159,7 @@ const COMMAND_GROUPS = {
           "  --language <language>         Optional language hint",
           "  --region <region>             Optional region hint",
           "  --timezone <iana>             Optional planning timezone metadata",
-          "  --show-confirm-token          Print confirm_token; omitted from stdout by default",
+          "  --redact-confirm-token        Hide confirm_token and store it in the private cache",
         ],
         examples: [
           `calle call plan --to-phone +15551234567 --goal "Confirm the appointment"`,
@@ -182,7 +184,7 @@ const COMMAND_GROUPS = {
         usage: "calle call run --plan-id <id> --confirm-token <token> [options]",
         options: [
           "  --plan-id <id>                Required; plan ID returned by plan_call",
-          "  --confirm-token <token>       Required; confirmation token returned by plan_call",
+          "  --confirm-token <token>       Required unless a redacted plan is in the private cache",
           "  --timezone <iana>             Local timezone for returned call timestamps",
         ],
         examples: ["calle call run --plan-id plan_123 --confirm-token token_123"],
@@ -251,7 +253,7 @@ const COMMAND_OPTION_NAMES = {
   "mcp config": new Set(),
   "mcp tools": new Set(),
   "mcp call": new Set(["args-json", "timezone"]),
-  "call plan": new Set(["to-phone", "goal", "language", "region", "timezone", "show-confirm-token"]),
+  "call plan": new Set(["to-phone", "goal", "language", "region", "timezone", "redact-confirm-token"]),
   "call start": new Set(["to-phone", "goal", "language", "region", "timezone"]),
   "call run": new Set(["plan-id", "confirm-token", "timezone"]),
   "call recover": new Set(["recovery-id", "timezone"]),
@@ -384,7 +386,7 @@ function parseOptions(argv) {
     "telemetry",
     "json",
     "help",
-    "show-confirm-token",
+    "redact-confirm-token",
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -491,6 +493,21 @@ function resolvePlanTimezone(options, env = process.env) {
   }
 
   return normalizeIanaTimezone(osTimezone());
+}
+
+function envFlagEnabled(env, key) {
+  const value = optionalEnvString(env, key);
+  if (!value) {
+    return false;
+  }
+  return ["1", "true", "yes", "on", "enabled"].includes(value.toLowerCase());
+}
+
+function resolveRedactConfirmToken(options, env = process.env) {
+  if (options.redactConfirmToken !== undefined) {
+    return Boolean(firstOptionValue(options.redactConfirmToken));
+  }
+  return envFlagEnabled(env, "CALLE_REDACT_CONFIRM_TOKEN");
 }
 
 function timezoneOffsetMinutes(timezone, instant = new Date()) {
@@ -977,41 +994,78 @@ function hasConfirmTokenValue(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function publicPlanCallResult(result, { showConfirmToken }) {
+function extractPlanConfirm(result) {
+  let planId = null;
+  let confirmToken = null;
+  let expiresAt = null;
+  const structured = recordObject(structuredPayload(result)) || {};
+  if (typeof structured.plan_id === "string" && structured.plan_id.trim()) {
+    planId = structured.plan_id.trim();
+  }
+  if (hasConfirmTokenValue(structured.confirm_token)) {
+    confirmToken = structured.confirm_token.trim();
+  }
+  if (typeof structured.confirm_expires_at === "string" && structured.confirm_expires_at.trim()) {
+    expiresAt = structured.confirm_expires_at.trim();
+  }
+  if (Array.isArray(result?.content)) {
+    for (const item of result.content) {
+      if (typeof item?.text !== "string") {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(item.text);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          continue;
+        }
+        if (!planId && typeof parsed.plan_id === "string" && parsed.plan_id.trim()) {
+          planId = parsed.plan_id.trim();
+        }
+        if (!confirmToken && hasConfirmTokenValue(parsed.confirm_token)) {
+          confirmToken = parsed.confirm_token.trim();
+        }
+        if (!expiresAt && typeof parsed.confirm_expires_at === "string" && parsed.confirm_expires_at.trim()) {
+          expiresAt = parsed.confirm_expires_at.trim();
+        }
+      } catch {
+        // Content text is not JSON; structured fields already collected.
+      }
+    }
+  }
+  return { planId, confirmToken, expiresAt };
+}
+
+function redactPlanCallResult(result, token) {
   const cloned = result && typeof result === "object" ? structuredClone(result) : result;
   if (!cloned || typeof cloned !== "object") {
     return cloned;
   }
   const structured = recordObject(cloned.structuredContent) || recordObject(cloned.structured_content);
-  const token = hasConfirmTokenValue(structured?.confirm_token) ? structured.confirm_token.trim() : null;
   if (structured) {
     structured.has_confirm_token = Boolean(token);
-    if (!showConfirmToken) {
-      delete structured.confirm_token;
-    }
+    delete structured.confirm_token;
   }
   if (Array.isArray(cloned.content)) {
     cloned.content = cloned.content.map((item) => {
       if (!item || typeof item.text !== "string") {
         return item;
       }
+      let text = item.text;
       try {
-        const parsed = JSON.parse(item.text);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.hasOwn(parsed, "confirm_token")) {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
           const nestedToken = hasConfirmTokenValue(parsed.confirm_token) ? parsed.confirm_token.trim() : token;
-          parsed.has_confirm_token = Boolean(nestedToken);
-          if (!showConfirmToken) {
-            delete parsed.confirm_token;
-          }
-          return { ...item, text: JSON.stringify(parsed) };
+          parsed.has_confirm_token = Boolean(nestedToken || token);
+          delete parsed.confirm_token;
+          text = JSON.stringify(parsed);
         }
       } catch {
         // Fall through to string redaction when content is not JSON.
       }
-      if (!showConfirmToken && token && item.text.includes(token)) {
-        return { ...item, text: item.text.split(token).join("") };
+      if (token && text.includes(token)) {
+        text = text.split(token).join("");
       }
-      return item;
+      return { ...item, text };
     });
   }
   return cloned;
@@ -1058,11 +1112,23 @@ function buildPlanRequestMeta(options, env = process.env) {
   return meta;
 }
 
-function buildRunArguments(options) {
-  return {
-    plan_id: requireStringOption(options, "planId", "--plan-id"),
-    confirm_token: requireStringOption(options, "confirmToken", "--confirm-token"),
-  };
+function buildRunArguments(options, config) {
+  const planId = requireStringOption(options, "planId", "--plan-id");
+  const explicitToken = optionalStringOption(options, "confirmToken");
+  if (explicitToken) {
+    return { plan_id: planId, confirm_token: explicitToken, confirm_token_source: null };
+  }
+  const cached = readPlanConfirm(config, planId);
+  if (cached?.confirmToken) {
+    return {
+      plan_id: planId,
+      confirm_token: cached.confirmToken,
+      confirm_token_source: "private_cache",
+    };
+  }
+  throw new InvalidArgumentsError(
+    "Missing required --confirm-token. After `calle call plan --redact-confirm-token`, `call run --plan-id` reads the token from the private cache."
+  );
 }
 
 function structuredPayload(result) {
@@ -1337,6 +1403,7 @@ async function writeRunCallSuccess({
   runId,
   statusTimezone,
   includeRunResult,
+  confirmTokenSource = null,
 }) {
   const { statusResult, statusError } = await fetchCallStatusBestEffort({ config, deps, runId });
   if (statusResult) {
@@ -1355,6 +1422,7 @@ async function writeRunCallSuccess({
     status_query_succeeded: statusError === null,
     status_result: statusResult,
     ...(statusError ? { status_error: statusError } : {}),
+    ...(confirmTokenSource ? { confirm_token_source: confirmTokenSource } : {}),
     ...callStatusCommand(config, runId, statusTimezone),
   });
 }
@@ -1424,11 +1492,24 @@ async function handleCallCommand({ command, positional, options, config, deps, s
         callStarted: false,
         retrySafe: true,
       });
-      writeJson(stdout, mcpSuccessPayload({
-        config,
-        toolName,
-        result: publicPlanCallResult(result, { showConfirmToken: Boolean(options.showConfirmToken) }),
-      }));
+      const env = deps.env || process.env;
+      if (resolveRedactConfirmToken(options, env)) {
+        const extracted = extractPlanConfirm(result);
+        if (extracted.planId && extracted.confirmToken) {
+          writePlanConfirm(config, {
+            planId: extracted.planId,
+            confirmToken: extracted.confirmToken,
+            expiresAt: extracted.expiresAt,
+          });
+        }
+        writeJson(stdout, mcpSuccessPayload({
+          config,
+          toolName,
+          result: redactPlanCallResult(result, extracted.confirmToken),
+        }));
+        return 0;
+      }
+      writeJson(stdout, mcpSuccessPayload({ config, toolName, result }));
       return 0;
     }
 
@@ -1494,7 +1575,7 @@ async function handleCallCommand({ command, positional, options, config, deps, s
 
     if (command === "run") {
       const statusTimezone = resolvePlanTimezone(options, deps.env || process.env);
-      const runArguments = buildRunArguments(options);
+      const runArguments = buildRunArguments(options, config);
       const { runResult, runId } = await runPlannedCall({
         config,
         deps,
@@ -1511,6 +1592,7 @@ async function handleCallCommand({ command, positional, options, config, deps, s
         runId,
         statusTimezone,
         includeRunResult: true,
+        confirmTokenSource: runArguments.confirm_token_source,
       });
       return 0;
     }

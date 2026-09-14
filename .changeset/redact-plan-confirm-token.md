@@ -2,4 +2,4 @@
 "@call-e/cli": patch
 ---
 
-Redact `confirm_token` from `call plan` stdout by default and add `--show-confirm-token`.
+Add opt-in `--redact-confirm-token` for `call plan` and let `call run --plan-id` reuse the private cache.

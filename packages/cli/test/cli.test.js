@@ -8,6 +8,7 @@ import { POST_AUTH_HELP_MESSAGE, preAuthHelpMessage, runCli } from "../lib/cli.j
 import {
   callRecoveryCachePath,
   pendingCachePath,
+  readPlanConfirm,
   tokenCachePath,
   writePrivateJson,
 } from "../lib/cache.js";
@@ -1275,11 +1276,14 @@ test("call plan maps flags to plan_call arguments", async () => {
   assert.equal(JSON.parse(result.stdout).tool_name, "plan_call");
 });
 
-test("call plan redacts confirm_token unless --show-confirm-token", async () => {
-  const cacheRoot = makeTempRoot("calle-cli-call-plan-redact");
-  const serverUrl = "https://mcp.example/mcp/openagent_oauth";
-  writeToken(cacheRoot, serverUrl);
-  const fetchImpl = async (_url, init) => {
+function planConfirmFetchImpl({
+  structuredContent = { plan_id: "plan-1", confirm_token: "confirm-SECRET-1" },
+  content = [
+    { type: "text", text: '{"plan_id":"plan-1","confirm_token":"confirm-SECRET-1"}' },
+    { type: "text", text: "token confirm-SECRET-1 in plain text" },
+  ],
+} = {}) {
+  return async (_url, init) => {
     const payload = JSON.parse(init.body);
     if (payload.method === "initialize") {
       return jsonRpcResponse({ jsonrpc: "2.0", id: payload.id, result: {} });
@@ -1291,43 +1295,214 @@ test("call plan redacts confirm_token unless --show-confirm-token", async () => 
       return jsonRpcResponse({
         jsonrpc: "2.0",
         id: payload.id,
-        result: {
-          structuredContent: { plan_id: "plan-1", confirm_token: "confirm-SECRET-1" },
-          content: [{ type: "text", text: '{"plan_id":"plan-1","confirm_token":"confirm-SECRET-1"}' }],
-        },
+        result: { structuredContent, content },
       });
     }
     throw new Error(`unexpected method: ${payload.method}`);
   };
-  const common = [
+}
+
+test("call plan prints confirm_token by default", async () => {
+  const cacheRoot = makeTempRoot("calle-cli-call-plan-default-token");
+  const serverUrl = "https://mcp.example/mcp/openagent_oauth";
+  writeToken(cacheRoot, serverUrl);
+
+  const result = await run(
+    [
+      "call",
+      "plan",
+      "--to-phone",
+      "+15551234567",
+      "--goal",
+      "Confirm appointment",
+      "--base-url",
+      "https://mcp.example",
+      "--cache-root",
+      cacheRoot,
+    ],
+    { fetchImpl: planConfirmFetchImpl() }
+  );
+  const payload = JSON.parse(result.stdout);
+
+  assert.equal(result.code, 0);
+  assert.equal(payload.result.structuredContent.confirm_token, "confirm-SECRET-1");
+  assert.equal(payload.result.structuredContent.has_confirm_token, undefined);
+  assert.equal(readPlanConfirm({ cacheRoot, serverUrl }, "plan-1"), null);
+});
+
+test("call plan --redact-confirm-token hides JSON and plain-text tokens and writes the cache", async () => {
+  const cacheRoot = makeTempRoot("calle-cli-call-plan-redact");
+  const serverUrl = "https://mcp.example/mcp/openagent_oauth";
+  writeToken(cacheRoot, serverUrl);
+
+  const result = await run(
+    [
+      "call",
+      "plan",
+      "--to-phone",
+      "+15551234567",
+      "--goal",
+      "Confirm appointment",
+      "--redact-confirm-token",
+      "--base-url",
+      "https://mcp.example",
+      "--cache-root",
+      cacheRoot,
+    ],
+    { fetchImpl: planConfirmFetchImpl() }
+  );
+  const payload = JSON.parse(result.stdout);
+
+  assert.equal(result.code, 0);
+  assert.equal(payload.result.structuredContent.plan_id, "plan-1");
+  assert.equal(payload.result.structuredContent.has_confirm_token, true);
+  assert.equal(payload.result.structuredContent.confirm_token, undefined);
+  assert.doesNotMatch(result.stdout, /confirm-SECRET-1/);
+  const redactedJson = JSON.parse(payload.result.content[0].text);
+  assert.equal(redactedJson.has_confirm_token, true);
+  assert.equal(redactedJson.confirm_token, undefined);
+  assert.doesNotMatch(payload.result.content[1].text, /confirm-SECRET-1/);
+  assert.deepEqual(readPlanConfirm({ cacheRoot, serverUrl }, "plan-1"), {
+    planId: "plan-1",
+    confirmToken: "confirm-SECRET-1",
+    expiresAt: null,
+  });
+});
+
+test("call plan honours CALLE_REDACT_CONFIRM_TOKEN=1", async () => {
+  const cacheRoot = makeTempRoot("calle-cli-call-plan-redact-env");
+  const serverUrl = "https://mcp.example/mcp/openagent_oauth";
+  writeToken(cacheRoot, serverUrl);
+
+  const result = await run(
+    [
+      "call",
+      "plan",
+      "--to-phone",
+      "+15551234567",
+      "--goal",
+      "Confirm appointment",
+      "--base-url",
+      "https://mcp.example",
+      "--cache-root",
+      cacheRoot,
+    ],
+    {
+      env: { CALLE_REDACT_CONFIRM_TOKEN: "1" },
+      fetchImpl: planConfirmFetchImpl(),
+    }
+  );
+  const payload = JSON.parse(result.stdout);
+
+  assert.equal(result.code, 0);
+  assert.equal(payload.result.structuredContent.confirm_token, undefined);
+  assert.equal(payload.result.structuredContent.has_confirm_token, true);
+  assert.equal(readPlanConfirm({ cacheRoot, serverUrl }, "plan-1")?.confirmToken, "confirm-SECRET-1");
+});
+
+test("call run reads a redacted confirm_token from the private cache", async () => {
+  const cacheRoot = makeTempRoot("calle-cli-call-run-cache");
+  const serverUrl = "https://mcp.example/mcp/openagent_oauth";
+  writeToken(cacheRoot, serverUrl);
+  const toolCalls = [];
+  const fetchImpl = async (_url, init) => {
+    const payload = JSON.parse(init.body);
+    if (payload.method === "initialize") {
+      return jsonRpcResponse({ jsonrpc: "2.0", id: payload.id, result: {} });
+    }
+    if (payload.method === "notifications/initialized") {
+      return jsonRpcResponse({});
+    }
+    if (payload.method === "tools/call") {
+      toolCalls.push(payload.params);
+      if (payload.params.name === "plan_call") {
+        return jsonRpcResponse({
+          jsonrpc: "2.0",
+          id: payload.id,
+          result: {
+            structuredContent: { plan_id: "plan-1", confirm_token: "confirm-SECRET-1" },
+            content: [{ type: "text", text: '{"plan_id":"plan-1","confirm_token":"confirm-SECRET-1"}' }],
+          },
+        });
+      }
+      if (payload.params.name === "run_call") {
+        return jsonRpcResponse({
+          jsonrpc: "2.0",
+          id: payload.id,
+          result: { structuredContent: { run_id: "run-1", status: "STARTED" } },
+        });
+      }
+      if (payload.params.name === "get_call_run") {
+        return jsonRpcResponse({
+          jsonrpc: "2.0",
+          id: payload.id,
+          result: { structuredContent: { run_id: "run-1", status: "IN_PROGRESS" } },
+        });
+      }
+    }
+    throw new Error(`unexpected method: ${payload.method}`);
+  };
+
+  const planned = await run(
+    [
+      "call",
+      "plan",
+      "--to-phone",
+      "+15551234567",
+      "--goal",
+      "Confirm appointment",
+      "--redact-confirm-token",
+      "--base-url",
+      "https://mcp.example",
+      "--cache-root",
+      cacheRoot,
+    ],
+    { fetchImpl }
+  );
+  assert.equal(planned.code, 0);
+  assert.doesNotMatch(planned.stdout, /confirm-SECRET-1/);
+
+  const ran = await run(
+    [
+      "call",
+      "run",
+      "--plan-id",
+      "plan-1",
+      "--base-url",
+      "https://mcp.example",
+      "--cache-root",
+      cacheRoot,
+    ],
+    { fetchImpl }
+  );
+  const payload = JSON.parse(ran.stdout);
+
+  assert.equal(ran.code, 0);
+  assert.equal(payload.confirm_token_source, "private_cache");
+  assert.deepEqual(toolCalls.find((call) => call.name === "run_call")?.arguments, {
+    plan_id: "plan-1",
+    confirm_token: "confirm-SECRET-1",
+  });
+});
+
+test("call run without --confirm-token errors when the private cache is empty", async () => {
+  const cacheRoot = makeTempRoot("calle-cli-call-run-missing-cache");
+  const result = await run([
     "call",
-    "plan",
-    "--to-phone",
-    "+15551234567",
-    "--goal",
-    "Confirm appointment",
+    "run",
+    "--plan-id",
+    "plan-1",
     "--base-url",
     "https://mcp.example",
     "--cache-root",
     cacheRoot,
-  ];
+  ]);
+  const payload = JSON.parse(result.stdout);
 
-  const redacted = await run(common, { fetchImpl });
-  const redactedPayload = JSON.parse(redacted.stdout);
-  assert.equal(redacted.code, 0);
-  assert.equal(redactedPayload.result.structuredContent.plan_id, "plan-1");
-  assert.equal(redactedPayload.result.structuredContent.has_confirm_token, true);
-  assert.equal(redactedPayload.result.structuredContent.confirm_token, undefined);
-  assert.doesNotMatch(redacted.stdout, /confirm-SECRET-1/);
-  const redactedText = JSON.parse(redactedPayload.result.content[0].text);
-  assert.equal(redactedText.has_confirm_token, true);
-  assert.equal(redactedText.confirm_token, undefined);
-
-  const revealed = await run([...common, "--show-confirm-token"], { fetchImpl });
-  const revealedPayload = JSON.parse(revealed.stdout);
-  assert.equal(revealed.code, 0);
-  assert.equal(revealedPayload.result.structuredContent.confirm_token, "confirm-SECRET-1");
-  assert.equal(revealedPayload.result.structuredContent.has_confirm_token, true);
+  assert.equal(result.code, 2);
+  assert.equal(payload.error.code, "invalid_arguments");
+  assert.match(payload.error.message, /^Missing required --confirm-token/);
+  assert.match(payload.error.message, /--redact-confirm-token/);
 });
 
 test("call plan injects timezone meta from CALLE_TIMEZONE", async () => {
