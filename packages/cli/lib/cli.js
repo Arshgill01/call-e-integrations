@@ -157,6 +157,7 @@ const COMMAND_GROUPS = {
           "  --language <language>         Optional language hint",
           "  --region <region>             Optional region hint",
           "  --timezone <iana>             Optional planning timezone metadata",
+          "  --show-confirm-token          Print confirm_token; omitted from stdout by default",
         ],
         examples: [
           `calle call plan --to-phone +15551234567 --goal "Confirm the appointment"`,
@@ -250,7 +251,7 @@ const COMMAND_OPTION_NAMES = {
   "mcp config": new Set(),
   "mcp tools": new Set(),
   "mcp call": new Set(["args-json", "timezone"]),
-  "call plan": new Set(["to-phone", "goal", "language", "region", "timezone"]),
+  "call plan": new Set(["to-phone", "goal", "language", "region", "timezone", "show-confirm-token"]),
   "call start": new Set(["to-phone", "goal", "language", "region", "timezone"]),
   "call run": new Set(["plan-id", "confirm-token", "timezone"]),
   "call recover": new Set(["recovery-id", "timezone"]),
@@ -383,6 +384,7 @@ function parseOptions(argv) {
     "telemetry",
     "json",
     "help",
+    "show-confirm-token",
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -971,6 +973,50 @@ function mcpSuccessPayload({ config, toolName = null, result, method = null }) {
   };
 }
 
+function hasConfirmTokenValue(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function publicPlanCallResult(result, { showConfirmToken }) {
+  const cloned = result && typeof result === "object" ? structuredClone(result) : result;
+  if (!cloned || typeof cloned !== "object") {
+    return cloned;
+  }
+  const structured = recordObject(cloned.structuredContent) || recordObject(cloned.structured_content);
+  const token = hasConfirmTokenValue(structured?.confirm_token) ? structured.confirm_token.trim() : null;
+  if (structured) {
+    structured.has_confirm_token = Boolean(token);
+    if (!showConfirmToken) {
+      delete structured.confirm_token;
+    }
+  }
+  if (Array.isArray(cloned.content)) {
+    cloned.content = cloned.content.map((item) => {
+      if (!item || typeof item.text !== "string") {
+        return item;
+      }
+      try {
+        const parsed = JSON.parse(item.text);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.hasOwn(parsed, "confirm_token")) {
+          const nestedToken = hasConfirmTokenValue(parsed.confirm_token) ? parsed.confirm_token.trim() : token;
+          parsed.has_confirm_token = Boolean(nestedToken);
+          if (!showConfirmToken) {
+            delete parsed.confirm_token;
+          }
+          return { ...item, text: JSON.stringify(parsed) };
+        }
+      } catch {
+        // Fall through to string redaction when content is not JSON.
+      }
+      if (!showConfirmToken && token && item.text.includes(token)) {
+        return { ...item, text: item.text.split(token).join("") };
+      }
+      return item;
+    });
+  }
+  return cloned;
+}
+
 function buildPlanArguments(options) {
   const toPhones = optionValues(options.toPhone)
     .map((value) => String(value).trim())
@@ -1378,7 +1424,11 @@ async function handleCallCommand({ command, positional, options, config, deps, s
         callStarted: false,
         retrySafe: true,
       });
-      writeJson(stdout, mcpSuccessPayload({ config, toolName, result }));
+      writeJson(stdout, mcpSuccessPayload({
+        config,
+        toolName,
+        result: publicPlanCallResult(result, { showConfirmToken: Boolean(options.showConfirmToken) }),
+      }));
       return 0;
     }
 

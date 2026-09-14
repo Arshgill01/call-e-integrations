@@ -153,7 +153,7 @@ subcommand are rejected instead of being silently ignored.
 | `calle mcp config` | Print MCP client configuration JSON. | None |
 | `calle mcp tools` | List tools from the configured MCP server. | None |
 | `calle mcp call <tool-name>` | Call an arbitrary MCP tool. | `<tool-name>` |
-| `calle call plan` | Plan a phone call through `plan_call`. | `--to-phone`, `--goal` |
+| `calle call plan` | Plan a phone call through `plan_call`. Stdout redacts `confirm_token` and sets `has_confirm_token` unless `--show-confirm-token` is passed. | `--to-phone`, `--goal` |
 | `calle call start` | Plan and run a phone call without printing confirmation data. | `--to-phone`, `--goal` |
 | `calle call run` | Run a planned phone call, then fetch status once. | `--plan-id`, `--confirm-token` |
 | `calle call recover` | Safely repeat an uncertain `run_call` with its original private confirmation data. | `--recovery-id` |
@@ -264,6 +264,7 @@ network requests or output.
 | `--language` | Text | None | `call plan`, `call start` | No | No | Language hint passed to `plan_call`. Only provide when explicitly known. | `calle call plan --to-phone +15551234567 --goal "Confirm" --language English` |
 | `--region` | Text | None | `call plan`, `call start` | No | No | Region hint passed to `plan_call`. Only provide when explicitly known. | `calle call plan --to-phone +15551234567 --goal "Confirm" --region US` |
 | `--timezone` | IANA timezone | System timezone | `call plan`, `call start`, `call run`, `call recover`, `call status` | No | No | Adds planning timezone metadata for planning commands and localizes returned call timestamps for run/status commands. | `calle call status --run-id run_123 --timezone Asia/Shanghai` |
+| `--show-confirm-token` | Boolean | `false` | `call plan` | No | No | Include `confirm_token` in `call plan` stdout. By default the CLI redacts it and reports `has_confirm_token` instead. | `calle call plan --to-phone +15551234567 --goal "Confirm" --show-confirm-token` |
 | `--plan-id` | Text | None | `call run` | Yes | No | Planned call ID returned by `plan_call`. Preserve exactly. | `calle call run --plan-id plan_123 --confirm-token token_123` |
 | `--confirm-token` | Text | None | `call run` | Yes | No | Execution confirmation token returned by `plan_call`. Preserve exactly. | `calle call run --plan-id plan_123 --confirm-token token_123` |
 | `--recovery-id` | Opaque text | None | `call recover` | Yes | No | Private-cache lookup ID returned when `run_call` has an uncertain outcome. Use only with the returned recovery command. | `calle call recover --recovery-id <recovery_id>` |
