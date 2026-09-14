@@ -2,4 +2,5 @@
 "@call-e/cursor-plugin": patch
 ---
 
-Read `get_call_run` summary and transcript from `result{}`, mark them untrusted, and tell agents not to call undocumented tools such as `track_ui_events`.
+Read `get_call_run` fields from `result{}`, treat all three MCP tools as
+untrusted output, and stop agents repeating an uncertain `run_call`.
