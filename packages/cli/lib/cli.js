@@ -1066,10 +1066,12 @@ function sanitizeUntrustedRemoteText(value, maxLength = 200) {
     .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
     .replace(/\u001b./g, "")
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
+  if (/\b(?:access_token|refresh_token|id_token|confirm_token|api[_-]?key|client_secret)\b["']?\s*[:=]/i.test(text)) {
+    return undefined;
+  }
   text = text
     .replace(/\b(?:sk|rk|pk|ak)-[A-Za-z0-9]{8,}\b/g, "[redacted]")
-    .replace(/\b(?:Bearer|bearer)\s+[A-Za-z0-9._-]+/g, "Bearer [redacted]")
-    .replace(/\b(?:access_token|refresh_token|id_token|api[_-]?key|client_secret)\b\s*[:=]\s*\S+/gi, "[redacted]");
+    .replace(/\b(?:Bearer|bearer)\s+[A-Za-z0-9._-]+/g, "Bearer [redacted]");
   text = text.replace(/\s+/g, " ").trim();
   if (!text) {
     return undefined;
@@ -1078,10 +1080,10 @@ function sanitizeUntrustedRemoteText(value, maxLength = 200) {
 }
 
 function mcpCallSideEffectDefaults(toolName) {
-  if (toolName === "plan_call" || toolName === "get_call_run") {
+  if (toolName === "plan_call") {
     return { callStarted: false, retrySafe: true };
   }
-  return { callStarted: "unknown", retrySafe: false };
+  return { callStarted: "unknown", retrySafe: toolName === "get_call_run" };
 }
 
 function mcpToolErrorFromResult(toolName, result) {

@@ -1298,6 +1298,32 @@ test("mcp call keeps remote isError text out of trusted stdout and stderr", asyn
   assert.doesNotMatch(payload.error.untrusted?.message ?? "", /\u001b|\n|sk-live-/);
 });
 
+test("mcp call omits remote messages containing credential assignments", async () => {
+  for (const message of [
+    '{"access_token":"synthetic-access-secret"}',
+    'confirm_token=synthetic-confirmation-secret',
+    "{'client_secret': 'synthetic secret with spaces'}",
+  ]) {
+    const { stdout, stderr, payload } = await runMcpCallToolError({
+      label: "calle-cli-mcp-call-credentials",
+      toolName: "get_call_run",
+      structuredContent: { message },
+    });
+    assert.equal(payload.error.untrusted, undefined);
+    assert.doesNotMatch(stdout + stderr, /synthetic/);
+  }
+});
+
+test("mcp call can retry a lookup without claiming the call never started", async () => {
+  const { payload } = await runMcpCallToolError({
+    label: "calle-cli-mcp-call-lookup-missing-flags",
+    toolName: "get_call_run",
+    structuredContent: { message: "Status lookup failed." },
+  });
+  assert.equal(payload.call_started, "unknown");
+  assert.equal(payload.retry_safe, true);
+});
+
 test("mcp call treats run_call isError without flags as unsafe to retry", async () => {
   const { payload } = await runMcpCallToolError({
     label: "calle-cli-mcp-call-run-missing-flags",

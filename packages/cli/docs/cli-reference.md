@@ -119,10 +119,13 @@ A JSON-RPC HTTP 200 is not tool success. If the MCP tool result has
 CLI-owned `error.code` of `mcp_tool_error`. The trusted `error.message` is
 always `The MCP tool returned an error.` Remote text, if shown at all, is
 control-stripped, credential-redacted, and bounded under `error.untrusted`.
+Messages containing credential assignments are omitted entirely.
 Do not treat transport success as a successful tool result.
 
-`plan_call` and `get_call_run` default to `call_started: false` and
-`retry_safe: true` when the tool omits those flags. `run_call` and any
+`plan_call` defaults to `call_started: false` and `retry_safe: true` when
+the tool omits those flags. `get_call_run` defaults to `call_started: "unknown"`
+and `retry_safe: true`: retrying a lookup is safe, but a failed lookup cannot
+prove that the call never started. `run_call` and any
 unknown tool default to `call_started: "unknown"` and `retry_safe: false`
 unless trusted structured metadata proves otherwise. A successful status
 lookup also does not mean the telephone call succeeded.
