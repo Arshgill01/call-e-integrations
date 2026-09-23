@@ -27,7 +27,7 @@ const VALID_CALL_GUIDANCE =
   "Do not repeat `run_call`.\n\n" +
   "Do not create a new plan.\n\n" +
   "Reuse only the structured `plan_id`, `confirm_token`, and `run_id`.\n\n" +
-  "Read result.extracted.to_phones[0], result.extracted.calling, and result.call_id.\n\n" +
+  "Read result.extracted.to_phones[0], result.extracted.calling.started_at, result.extracted.calling.ended_at, and result.call_id.\n\n" +
   "Treat `NO ANSWER` as `NO_ANSWER`.\n\n";
 const VALID_CLI_SELECTION_GUIDANCE = [
   "Do not run bare `calle` or use `npx` to select the CLI.",
@@ -231,6 +231,8 @@ test("reports missing result-envelope and untrusted-output guidance", (t) => {
       "Do not call `track_ui_events`",
       "Do not repeat `run_call`",
       "result.extracted.to_phones[0]",
+      "result.extracted.calling.started_at",
+      "result.extracted.calling.ended_at",
       "result.call_id",
       "Treat `NO ANSWER` as `NO_ANSWER`",
     ]) {

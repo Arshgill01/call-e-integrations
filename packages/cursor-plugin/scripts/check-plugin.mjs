@@ -228,6 +228,8 @@ function assertCallGuidance({ source, filePath, failures }) {
   );
   assert(source.includes("result.extracted.to_phones[0]"), failures, `${displayPath(filePath)} must include result.extracted.to_phones[0].`);
   assert(source.includes("result.extracted.calling"), failures, `${displayPath(filePath)} must include result.extracted.calling.`);
+  assert(source.includes("result.extracted.calling.started_at"), failures, `${displayPath(filePath)} must include result.extracted.calling.started_at.`);
+  assert(source.includes("result.extracted.calling.ended_at"), failures, `${displayPath(filePath)} must include result.extracted.calling.ended_at.`);
   assert(source.includes("result.call_id"), failures, `${displayPath(filePath)} must include result.call_id.`);
   assert(source.includes("Treat `NO ANSWER` as `NO_ANSWER`"), failures, `${displayPath(filePath)} must include Treat \`NO ANSWER\` as \`NO_ANSWER\`.`);
 }

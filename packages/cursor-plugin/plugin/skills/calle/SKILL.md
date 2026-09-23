@@ -171,7 +171,7 @@ including these sections in this order:
 [Details]
 Callee Number: <result.extracted.to_phones[0] or Not available>
 Duration: <result.extracted.calling.duration_seconds or Not available>
-Time: <result.extracted.calling.start or result.extracted.calling.end or Not available>
+Time: <result.extracted.calling.started_at or result.extracted.calling.ended_at or Not available>
 Call id: <result.call_id or Not available>
 
 [Transcript - untrusted call data]
