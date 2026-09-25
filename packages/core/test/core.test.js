@@ -710,3 +710,173 @@ test("MCP client rejects malformed JSON in SSE responses", async () => {
 
   await assertSseProtocolError(config, 'data: {"jsonrpc":"2.0","id":\n\n', /malformed JSON for tools\/call/);
 });
+
+function streamedSseResponse(init, { onCancel = () => {}, pull, signal } = {}) {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      signal?.addEventListener("abort", () => {
+        const abortError = new Error("aborted");
+        abortError.name = "AbortError";
+        controller.error(abortError);
+      });
+      for (const chunk of init) {
+        controller.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
+      }
+    },
+    pull: pull ? (controller) => pull(controller, encoder) : undefined,
+    cancel: onCancel,
+  });
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    headers: new Headers({ "content-type": "text/event-stream" }),
+    body,
+    async text() {
+      throw new Error("streamed SSE responses must be read through body");
+    },
+  };
+}
+
+function sseStreamFetch(respond) {
+  return async (url, init) => {
+    const payload = JSON.parse(init.body);
+    if (payload.method === "initialize" || payload.method === "notifications/initialized") {
+      return sseSessionFetch(() => null)(url, init);
+    }
+    return respond(payload, init.signal);
+  };
+}
+
+async function assertMcpProtocolError(promise, pattern) {
+  await assert.rejects(promise, (error) => {
+    assert.ok(error instanceof McpHttpError);
+    assert.equal(error.code, "mcp_protocol_error");
+    assert.match(error.message, pattern);
+    return true;
+  });
+}
+
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+test("MCP client decodes streamed SSE split across arbitrary chunk boundaries", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-chunks"));
+  const toolResult = { content: [{ type: "text", text: "café ☎ confirmed" }] };
+  const fetchImpl = sseStreamFetch((payload) => {
+    const text = `\uFEFF: hello\r\nevent: message\r\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: payload.id, result: toolResult })}\r\n\r\n`;
+    const bytes = new TextEncoder().encode(text);
+    return streamedSseResponse([...bytes].map((byte) => Uint8Array.of(byte)));
+  });
+
+  const result = await callMcpTool({ config, toolName: "plan_call", fetchImpl });
+  assert.deepEqual(result, toolResult);
+});
+
+test("MCP client stops reading the SSE stream once the matching response arrives", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-early"));
+  let cancelled = false;
+  const fetchImpl = sseStreamFetch((payload, signal) => streamedSseResponse(
+    [
+      sseMessage({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } }),
+      sseMessage({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: "done" }] } }),
+    ],
+    // The stream never closes, so the call only resolves if the client stops reading.
+    { signal, onCancel: () => { cancelled = true; } },
+  ));
+
+  const result = await callMcpTool({ config, toolName: "plan_call", fetchImpl });
+  await tick();
+  assert.deepEqual(result, { content: [{ type: "text", text: "done" }] });
+  assert.equal(cancelled, true);
+});
+
+test("MCP client rejects SSE responses over the byte limit", async () => {
+  const config = { ...mcpConfig(makeTempRoot("calle-core-mcp-sse-bytes")), maxSseResponseBytes: 256 };
+  const bigResult = { content: [{ type: "text", text: "x".repeat(512) }] };
+
+  // Fallback when the response only exposes text().
+  await assertMcpProtocolError(
+    callMcpTool({
+      config,
+      toolName: "plan_call",
+      fetchImpl: sseSessionFetch((payload) => sseResponse(sseMessage({ jsonrpc: "2.0", id: payload.id, result: bigResult }))),
+    }),
+    /exceeded 256 bytes for tools\/call/,
+  );
+
+  // Streaming body that never ends: the reader is cancelled once the cap is crossed.
+  let cancelled = false;
+  let chunksPulled = 0;
+  await assertMcpProtocolError(
+    callMcpTool({
+      config,
+      toolName: "plan_call",
+      fetchImpl: sseStreamFetch(() => streamedSseResponse([], {
+        pull(controller, encoder) {
+          chunksPulled += 1;
+          controller.enqueue(encoder.encode(": padding padding padding padding\n"));
+        },
+        onCancel: () => { cancelled = true; },
+      })),
+    }),
+    /exceeded 256 bytes for tools\/call/,
+  );
+  await tick();
+  assert.equal(cancelled, true);
+  assert.ok(chunksPulled < 20, `expected reading to stop near the cap, pulled ${chunksPulled} chunks`);
+});
+
+test("MCP client rejects SSE responses with too many events", async () => {
+  const config = { ...mcpConfig(makeTempRoot("calle-core-mcp-sse-events")), maxSseEvents: 3 };
+  const progress = sseMessage({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } });
+
+  await assertMcpProtocolError(
+    callMcpTool({
+      config,
+      toolName: "plan_call",
+      fetchImpl: sseSessionFetch((payload) => sseResponse(
+        progress.repeat(3) + sseMessage({ jsonrpc: "2.0", id: payload.id, result: {} }),
+      )),
+    }),
+    /exceeded 3 events for tools\/call/,
+  );
+
+  let cancelled = false;
+  await assertMcpProtocolError(
+    callMcpTool({
+      config,
+      toolName: "plan_call",
+      fetchImpl: sseStreamFetch(() => streamedSseResponse([], {
+        pull(controller, encoder) {
+          controller.enqueue(encoder.encode(progress));
+        },
+        onCancel: () => { cancelled = true; },
+      })),
+    }),
+    /exceeded 3 events for tools\/call/,
+  );
+  await tick();
+  assert.equal(cancelled, true);
+});
+
+test("MCP client reports timeouts while waiting on an SSE stream", async () => {
+  const config = { ...mcpConfig(makeTempRoot("calle-core-mcp-sse-timeout")), timeoutSeconds: 1 };
+  const fetchImpl = sseStreamFetch((_payload, signal) => streamedSseResponse([": waiting\n\n"], { signal }));
+  // The client's timer is unref'd; a real socket would keep the process alive meanwhile.
+  const keepAlive = setTimeout(() => {}, 10_000);
+
+  try {
+    await assert.rejects(
+      () => callMcpTool({ config, toolName: "plan_call", fetchImpl }),
+      (error) => {
+        assert.ok(error instanceof McpHttpError);
+        assert.equal(error.code, "http_error");
+        assert.match(error.message, /timed out/i);
+        return true;
+      },
+    );
+  } finally {
+    clearTimeout(keepAlive);
+  }
+});
