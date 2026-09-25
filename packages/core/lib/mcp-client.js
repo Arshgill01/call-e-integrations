@@ -50,6 +50,100 @@ function parseResponseBody(text) {
   return JSON.parse(text);
 }
 
+function isEventStreamResponse(headers) {
+  const contentType = String(headers["content-type"] || "");
+  return contentType.split(";")[0].trim().toLowerCase() === "text/event-stream";
+}
+
+function parseSseEvents(text) {
+  const events = [];
+  let eventType = "";
+  let dataLines = [];
+  const lines = text.replace(/^\uFEFF/u, "").split(/\r\n|\r|\n/u);
+  // The last element is whatever followed the final line break. An event is only
+  // complete once a blank line ends it, so a trailing partial event is dropped.
+  lines.pop();
+
+  for (const line of lines) {
+    if (line === "") {
+      if (dataLines.length > 0) {
+        events.push({ event: eventType || "message", data: dataLines.join("\n") });
+      }
+      eventType = "";
+      dataLines = [];
+      continue;
+    }
+    if (line.startsWith(":")) {
+      continue;
+    }
+    const colonIndex = line.indexOf(":");
+    const field = colonIndex === -1 ? line : line.slice(0, colonIndex);
+    let value = colonIndex === -1 ? "" : line.slice(colonIndex + 1);
+    if (value.startsWith(" ")) {
+      value = value.slice(1);
+    }
+    if (field === "data") {
+      dataLines.push(value);
+    } else if (field === "event") {
+      eventType = value;
+    }
+  }
+
+  return events;
+}
+
+function sseProtocolError(message, { responseText, headers }) {
+  return new McpHttpError(message, {
+    responseText,
+    headers,
+    code: "mcp_protocol_error",
+  });
+}
+
+function jsonRpcResponseFromEventStream(text, { payload, headers }) {
+  const expectsResponse = payload.id !== undefined;
+  let orphanError = null;
+
+  for (const event of parseSseEvents(text)) {
+    if (event.event !== "message") {
+      continue;
+    }
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      throw sseProtocolError(`MCP event stream contained malformed JSON for ${payload.method}`, {
+        responseText: text,
+        headers,
+      });
+    }
+    for (const candidate of Array.isArray(message) ? message : [message]) {
+      const record = objectRecord(candidate);
+      if (!record || record.method !== undefined || !("result" in record || "error" in record)) {
+        // Server-initiated requests and notifications can be interleaved before the response.
+        continue;
+      }
+      if (expectsResponse && record.id === payload.id) {
+        return record;
+      }
+      if (record.id === null && record.error && !orphanError) {
+        orphanError = record;
+      }
+    }
+  }
+
+  if (orphanError) {
+    return orphanError;
+  }
+  if (!expectsResponse) {
+    return null;
+  }
+  throw sseProtocolError(`MCP event stream ended without a JSON-RPC response for ${payload.method}`, {
+    responseText: text,
+    headers,
+  });
+}
+
 async function requestJsonRpc(fetchImpl, url, { headers, payload, timeoutMs }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -80,6 +174,10 @@ async function requestJsonRpc(fetchImpl, url, { headers, payload, timeoutMs }) {
         payload: body,
         headers: responseHeaders,
       });
+    }
+
+    if (isEventStreamResponse(responseHeaders)) {
+      body = jsonRpcResponseFromEventStream(text, { payload, headers: responseHeaders });
     }
 
     if (body?.error) {

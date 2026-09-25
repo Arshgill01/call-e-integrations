@@ -54,6 +54,52 @@ function jsonResponse(body, { status = 200, statusText = "OK", headers = {} } = 
   };
 }
 
+function sseResponse(text, { status = 200, statusText = "OK", headers = {} } = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText,
+    headers: new Headers({ "content-type": "text/event-stream", ...headers }),
+    async text() {
+      return text;
+    },
+  };
+}
+
+function sseMessage(message, { event = "message" } = {}) {
+  return `${event ? `event: ${event}\n` : ""}data: ${JSON.stringify(message)}\n\n`;
+}
+
+function sseSessionFetch(respond) {
+  return async (_url, init) => {
+    const payload = JSON.parse(init.body);
+    if (payload.method === "initialize") {
+      return sseResponse(sseMessage({ jsonrpc: "2.0", id: payload.id, result: {} }), {
+        headers: { "mcp-session-id": "mcp-session-sse" },
+      });
+    }
+    if (payload.method === "notifications/initialized") {
+      assert.equal(init.headers["mcp-session-id"], "mcp-session-sse");
+      return { ok: true, status: 202, statusText: "Accepted", headers: new Headers(), async text() { return ""; } };
+    }
+    return respond(payload);
+  };
+}
+
+async function assertSseProtocolError(config, streamText, pattern) {
+  const fetchImpl = sseSessionFetch(() => sseResponse(streamText));
+  await assert.rejects(
+    () => callMcpTool({ config, toolName: "plan_call", fetchImpl }),
+    (error) => {
+      assert.ok(error instanceof McpHttpError);
+      assert.equal(error.code, "mcp_protocol_error");
+      assert.match(error.message, pattern);
+      assert.equal(error.responseText, streamText);
+      return true;
+    },
+  );
+}
+
 function mcpConfig(cacheRoot) {
   const serverUrl = "https://example.test/mcp/openagent_oauth";
   writePrivateJson(tokenCachePath(cacheRoot, serverUrl), {
@@ -552,4 +598,115 @@ test("MCP client reports request timeouts", async () => {
       return true;
     },
   );
+});
+
+test("MCP client decodes tool lists from SSE responses like JSON responses", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-tools"));
+  const tools = { tools: [{ name: "plan_call", inputSchema: { type: "object" } }] };
+  const fromJson = await listMcpTools({
+    config,
+    fetchImpl: async (_url, init) => {
+      const payload = JSON.parse(init.body);
+      return jsonResponse(payload.method === "tools/list" ? { jsonrpc: "2.0", id: payload.id, result: tools } : { result: {} });
+    },
+  });
+  const fromSse = await listMcpTools({
+    config,
+    fetchImpl: sseSessionFetch((payload) => {
+      assert.equal(payload.method, "tools/list");
+      return sseResponse(
+        `: keep-alive\nid: 1\n${sseMessage({ jsonrpc: "2.0", id: payload.id, result: tools })}`,
+        { headers: { "content-type": "text/event-stream; charset=utf-8" } },
+      );
+    }),
+  });
+
+  assert.deepEqual(fromJson, tools);
+  assert.deepEqual(fromSse, tools);
+});
+
+test("MCP client joins multi-line SSE data and accepts CRLF framing", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-multiline"));
+  const fetchImpl = sseSessionFetch((payload) => {
+    const json = JSON.stringify(
+      { jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: "ok" }], isError: false } },
+      null,
+      2,
+    );
+    const data = json.split("\n").map((line) => `data: ${line}`).join("\r\n");
+    return sseResponse(`event: message\r\n${data}\r\n\r\n`);
+  });
+
+  const result = await callMcpTool({ config, toolName: "plan_call", fetchImpl });
+  assert.deepEqual(result, { content: [{ type: "text", text: "ok" }], isError: false });
+});
+
+test("MCP client skips interleaved SSE notifications and mismatched ids", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-interleaved"));
+  const fetchImpl = sseSessionFetch((payload) => sseResponse([
+    sseMessage({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } }),
+    sseMessage({ jsonrpc: "2.0", id: "other-request", result: { content: [{ type: "text", text: "wrong" }] } }),
+    sseMessage({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: "right" }] } }, { event: "" }),
+  ].join("")));
+
+  const result = await callMcpTool({ config, toolName: "plan_call", fetchImpl });
+  assert.deepEqual(result, { content: [{ type: "text", text: "right" }] });
+});
+
+test("MCP client preserves isError tool results from SSE responses", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-iserror"));
+  const toolResult = { content: [{ type: "text", text: "lookup failed" }], isError: true };
+  const fetchImpl = sseSessionFetch((payload) => sseResponse(sseMessage({ jsonrpc: "2.0", id: payload.id, result: toolResult })));
+
+  const result = await callMcpTool({ config, toolName: "get_call_run", fetchImpl });
+  assert.deepEqual(result, toolResult);
+});
+
+test("MCP client surfaces JSON-RPC errors delivered over SSE", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-error"));
+  const fetchImpl = sseSessionFetch((payload) => sseResponse(sseMessage({
+    jsonrpc: "2.0",
+    id: payload.id,
+    error: { code: -32602, message: "invalid params" },
+  })));
+
+  await assert.rejects(
+    () => callMcpTool({ config, toolName: "plan_call", fetchImpl }),
+    (error) => {
+      assert.ok(error instanceof McpHttpError);
+      assert.equal(error.code, "mcp_error");
+      assert.deepEqual(error.payload, { code: -32602, message: "invalid params" });
+      return true;
+    },
+  );
+});
+
+test("MCP client rejects SSE responses without a matching JSON-RPC response", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-missing"));
+  const missing = /ended without a JSON-RPC response for tools\/call/;
+
+  await assertSseProtocolError(config, "", missing);
+  await assertSseProtocolError(config, ": keep-alive\n\n", missing);
+  await assertSseProtocolError(
+    config,
+    sseMessage({ jsonrpc: "2.0", id: "other-request", result: { content: [] } }),
+    missing,
+  );
+  await assertSseProtocolError(
+    config,
+    sseMessage({ jsonrpc: "2.0", id: "calle-plan_call", result: {} }, { event: "ping" }),
+    missing,
+  );
+  // A final event that is not terminated by a blank line is truncated and must not count.
+  await assertSseProtocolError(
+    config,
+    `data: ${JSON.stringify({ jsonrpc: "2.0", id: "calle-plan_call", result: {} })}\n`,
+    missing,
+  );
+});
+
+test("MCP client rejects malformed JSON in SSE responses", async () => {
+  const config = mcpConfig(makeTempRoot("calle-core-mcp-sse-malformed"));
+
+  await assertSseProtocolError(config, 'data: {"jsonrpc":"2.0","id":\n\n', /malformed JSON for tools\/call/);
 });
